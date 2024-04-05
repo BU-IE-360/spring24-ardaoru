@@ -1,3 +1,4 @@
+Welcome to the Github page where Arda Oru's works and assignments are located.
 
 ##Homeworks
 
