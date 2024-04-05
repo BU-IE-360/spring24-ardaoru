@@ -1,0 +1,291 @@
+---
+title: "360HW1"
+author: "Arda Oru"
+date: "2024-04-02"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Results and Analysis
+
+The aim of this assignment is to predict 3 independent variables using different datasets. Time series variables to be estimated are Antalya housing sales(Antalya.konut.satış), passenger vehicle production(binek.taşıt.üretim) and consumer confidence index (tüketici.güven.endeksi).When selecting independent variables, care was taken to ensure that they were not correlated with each other and were related to the prediction variable.
+
+When estimating passenger vehicle production, I paid attention to the following points: I used the EU consumer price index since a significant part of Turkey's vehicle production is exported to Europe. In addition, due to the automotive industry, which occupies a significant share in the Turkish industry, I added the capacity utilization rate in our industry to my data sets. Finally, I used passenger vehicle export data to take non-European exports into account.
+
+While predicting Antalya housing sales, I added the housing price index and loan interest rates to my analysis.
+
+Finally, I added total credit and debit card expenditures and unemployment data to my analysis to estimate the consumer confidence index. The reason why I added total card expenditures is my assumption that the consumer price index and expenditures will have a linear relationship. If trust is low, consumers will be more savings-oriented and reduce their spending. Additionally, unemployment should be one of the most important parts of the confidence index.
+
+
+
+```{r}
+require(data.table)
+require(lubridate)
+require(forecast)
+require(skimr)
+require(repr)
+require(openxlsx) 
+require(ggplot2)
+require(data.table)
+require(skimr)
+require(GGally)
+require(ggcorrplot)
+require(forecast)
+```
+
+```{r}
+data_path = "C:\\Users\\ardao\\Desktop\\cor.xlsx"
+cor=read.xlsx(data_path)
+ggpairs(cor)
+```
+Here, it can be seen that there is no corellation between forecast variables. 
+
+## Data preperation
+Below, I prepared related data.
+
+```{r}
+options(repr.plot.width=12.7, repr.plot.height=8.5)
+
+data_path = "C:\\Users\\ardao\\Desktop\\antalya_konut_satisi.xlsx"
+konut=read.xlsx(data_path)
+head(konut,5)
+str(konut)
+```
+```{r}
+require(lubridate)
+konut$Tarih <- ym(konut$Tarih)
+konut$Konut_kredi_faizleri <- as.numeric(konut$Konut_kredi_faizleri)
+head(konut)
+```
+
+```{r}
+data_path= "C:\\Users\\ardao\\Desktop\\binek_tasit_uretim.xlsx"
+tasit=read.xlsx(data_path)
+head(tasit,5)
+str(tasit)
+```
+
+```{r}
+tasit$Tarih <- ym(tasit$Tarih)
+head(tasit)
+```
+
+```{r}
+data_path = "C:\\Users\\ardao\\Desktop\\tuketici_guven_endeksi.xlsx"
+guven=read.xlsx(data_path)
+head(guven,5)
+str(guven)
+```
+
+```{r}
+guven$Tarih <- ym(guven$Tarih)
+str(guven)
+```
+
+## Brief observations on forecast variables.
+
+```{r}
+ggplot(konut ,aes(x=Tarih,y=konut$Konut_kredi_faizleri)) + geom_line()
+ggplot(konut ,aes(x=Tarih,y=konut$Antalya_isparta_Konut_fiyat_endeksi)) + geom_line()
+ggplot(konut ,aes(x=Tarih,y=konut$Antalya_konut_satis)) + geom_line()
+```
+
+While housing loan interest rates have shown a sharp upward trend, especially in recent years, the housing price index has continued to increase linearly. Housing sales do not tend to show any trend, but there may be seasonality.
+
+```{r}
+ggplot(tasit ,aes(x=Tarih,y=tasit$kapasite_kullanim)) + geom_line()
+ggplot(tasit ,aes(x=Tarih,y=tasit$ab_fiyat_endeksi)) + geom_line()
+ggplot(tasit ,aes(x=Tarih,y=tasit$binek_tasit_ihracat)) + geom_line()
+ggplot(tasit ,aes(x=Tarih,y=tasit$binek_tasit_uretim)) + geom_line()
+```
+
+When the capacity utilization rate is examined, there is a regular decreasing trend from 2022 to mid-2023, followed by a recovery trend. The reason for the recovery may be the end of the economics of the presidential election and a return to orthodox economic policies.
+
+The EU consumer price index has a linear upward trend.
+
+There seems to be seasonality in passenger vehicle exports.
+
+There seems to be seasonality and a very slightly increasing trend in passenger vehicle production.
+
+
+```{r}
+ggplot(guven ,aes(x=Tarih,y=guven$USD_Banka_Karti_ve_Kredi_Karti_Harcama_tutari)) + geom_line()
+ggplot(guven ,aes(x=Tarih,y=guven$tuketici_guven_endeksi)) + geom_line()
+ggplot(guven ,aes(x=Tarih,y=guven$issizlik_oranlar)) + geom_line()
+```
+
+In order to eliminate the exchange rate effect, I converted the card spending amounts into dollars by dividing them by the average exchange rates. However, it shows an increasing trend.
+
+Unemployment generally tends to decrease. Really cheaper labor force and increased production and consumption demand after Covid may have contributed to this.
+
+I could not make a clear comment about the consumer confidence index.
+
+
+##Corelations
+
+
+
+```{r}
+require(GGally)
+ggpairs(konut)
+```
+
+As can be seen, there is a high correlation between our data set and date. We can clearly say that there is an increasing trend.
+
+Here, there seems to be multicollinearity between loan interest rates and the housing price index. It might make sense to remove someone from the data set.
+
+```{r}
+ggpairs(tasit)
+```
+There doesn't seem to be a problematic correlation here.
+
+
+```{r}
+ggpairs(guven)
+```
+
+There appears to be a high negative correlation between unemployment and card spending. This is quite plausible because as unemployment rises, spending will fall due to lost income.
+
+
+
+## Linear trends
+
+```{r}
+ggplot(konut ,aes(x=Tarih,y=konut$Antalya_konut_satis)) + geom_point()+geom_smooth(method='loess')
+ggplot(tasit ,aes(x=Tarih,y=tasit$binek_tasit_uretim)) + geom_point()+geom_smooth(method='loess')
+ggplot(guven ,aes(x=Tarih,y=guven$tuketici_guven_endeksi)) + geom_point()+geom_smooth(method='loess')
+```
+
+No linear trend appears. There may be a polynomial trend.
+
+## Implementation of dummy variables for seasonality and trend
+
+```{r}
+konut <- as.data.table(konut)
+konut[,trnd:=1:.N]
+konut[,ay:=as.character(month(Tarih,label=T))]
+head(konut)
+```
+```{r}
+tasit <- as.data.table(tasit)
+tasit[,trnd:=1:.N]
+tasit[,ay:=as.character(month(Tarih,label=T))]
+head(tasit)
+```
+```{r}
+guven <- as.data.table(guven)
+guven[,trnd:=1:.N]
+guven[,ay:=as.character(month(Tarih,label=T))]
+head(guven)
+```
+## Seasonal trends
+
+We examined the trends in each season (monthly).
+
+```{r}
+ggplot(konut,aes(x=Tarih,y=konut$Antalya_konut_satis)) +
+        geom_point() + geom_smooth(method=lm,linewidth=3) + facet_wrap(~ay)
+ggplot(tasit,aes(x=Tarih,y=tasit$binek_tasit_uretim)) +
+        geom_point() + geom_smooth(method=lm,linewidth=3) + facet_wrap(~ay)
+ggplot(guven,aes(x=Tarih,y=guven$tuketici_guven_endeksi)) +
+        geom_point() + geom_smooth(method=lm,linewidth=3) + facet_wrap(~ay)
+```
+As can be seen, the monthly impact is very low. This makes sense because we only have a few data for each month.
+
+
+## Forecast models: 
+For Antlalya housing sales, housing loan interest and housing price index were in correlation. Therefore, I installed 2 different models. In one, I used both data, and in the other, I used only the house price index.
+
+```{r}
+lm_base=lm(konut$Antalya_konut_satis~trnd+ay+konut$Konut_kredi_faizleri+konut$Antalya_isparta_Konut_fiyat_endeksi,konut)
+summary(lm_base)
+checkresiduals(lm_base$residuals)
+tmp=copy(konut)
+tmp[,actual:=Antalya_konut_satis]
+tmp[,predicted_trend:=predict(lm_base,tmp)]
+tmp[,residual_trend:=actual-predicted_trend]
+#head(tmp)
+ggplot(tmp ,aes(x=Tarih)) +
+        geom_line(aes(y=actual,color='real')) + 
+        geom_line(aes(y=predicted_trend,color='predicted'))
+```
+```{r}
+lm_base=lm(konut$Antalya_konut_satis~trnd+ay+konut$Antalya_isparta_Konut_fiyat_endeksi,konut)
+summary(lm_base)
+checkresiduals(lm_base$residuals)
+tmp=copy(konut)
+tmp[,actual:=Antalya_konut_satis]
+tmp[,predicted_trend:=predict(lm_base,tmp)]
+tmp[,residual_trend:=actual-predicted_trend]
+#head(tmp)
+ggplot(tmp ,aes(x=Tarih)) +
+        geom_line(aes(y=actual,color='real')) + 
+        geom_line(aes(y=predicted_trend,color='predicted'))
+```
+The model in which we used only the house price index gave a slightly better r^2 value. The reason for this was to eliminate multicollinearity.
+
+There is no seasonality and autocorrellation for residuals and they distribute like normal.
+
+
+
+```{r}
+lm_base=lm(tasit$binek_tasit_uretim~trnd+ay+tasit$kapasite_kullanim+tasit$ab_fiyat_endeksi+tasit$binek_tasit_ihracat,tasit)
+summary(lm_base)
+checkresiduals(lm_base$residuals)
+tmp=copy(tasit)
+tmp[,actual:=binek_tasit_uretim]
+tmp[,predicted_trend:=predict(lm_base,tmp)]
+tmp[,residual_trend:=actual-predicted_trend]
+#head(tmp)
+ggplot(tmp ,aes(x=Tarih)) +
+        geom_line(aes(y=actual,color='real')) + 
+        geom_line(aes(y=predicted_trend,color='predicted'))
+```
+The performance of the model is not very good, and the lag1 value is quite high. We can try differencing to solve this problem.
+
+```{r}
+require(zoo)
+lag1dif <- diff(zoo(tasit$binek_tasit_uretim),lag=1,differences = 1,na.pad = TRUE)
+tasit$lag_dif <- lag1dif
+tasit <- na.omit(tasit)
+tasit$lag_dif <- as.numeric(tasit$lag_dif)
+head(tasit)
+```
+
+```{r}
+lm_base=lm(tasit$lag_dif~trnd+ay+tasit$kapasite_kullanim+tasit$ab_fiyat_endeksi+tasit$binek_tasit_ihracat,tasit)
+summary(lm_base)
+checkresiduals(lm_base$residuals)
+tmp=copy(tasit)
+tmp[,actual:=lag_dif]
+tmp[,predicted_trend:=predict(lm_base,tmp)]
+tmp[,residual_trend:=actual-predicted_trend]
+#head(tmp)
+ggplot(tmp ,aes(x=Tarih)) +
+        geom_line(aes(y=actual,color='real')) + 
+        geom_line(aes(y=predicted_trend,color='predicted'))
+```
+
+Unfortunately, our solution method did not work. Lag1 remains high. And the r^2 value got worse. With this result, we can say that we do not have a good model.
+
+
+```{r}
+lm_base=lm(guven$tuketici_guven_endeksi~trnd+ay+USD_Banka_Karti_ve_Kredi_Karti_Harcama_tutari+guven$issizlik_oranlar,guven)
+summary(lm_base)
+checkresiduals(lm_base$residuals)
+tmp=copy(guven)
+tmp[,actual:=tuketici_guven_endeksi]
+tmp[,predicted_trend:=predict(lm_base,tmp)]
+tmp[,residual_trend:=actual-predicted_trend]
+#head(tmp)
+ggplot(tmp ,aes(x=Tarih)) +
+        geom_line(aes(y=actual,color='real')) + 
+        geom_line(aes(y=predicted_trend,color='predicted'))
+```
+
+The residues are distributed normally. There does not appear to be any autocorrelation. However, the r^2 value is quite bad. Adding a new variabla to the model may solve this problem.
