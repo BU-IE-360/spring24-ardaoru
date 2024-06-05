@@ -2,9 +2,9 @@ Welcome to the Github page where Arda Oru's works and assignments are located.
 
 ##Term Project
 
-[Project html file](https://bu-ie-360.github.io/spring24-ardaoru/IE360Final.html) 
+[Term Project html File](https://bu-ie-360.github.io/spring24-ardaoru/Term%20Project/IE360Final.html)
 
-[Project rmd file](https://bu-ie-360.github.io/spring24-ardaoru/IE360Final.rmd)
+[Project Rmdfile](https://bu-ie-360.github.io/spring24-ardaoru/erm%20Project/IE360Final.rmd)
 
 
 ##Homeworks
