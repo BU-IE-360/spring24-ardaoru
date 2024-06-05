@@ -1,0 +1,911 @@
+---
+title: "Project"
+author: "Arda Oru, Erce Sezgün Yiğit Memceroktay"
+output: html_document
+date: "2024-06-05"
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+# Introduction
+
+Solar power plants offer a sustainable method for energy generation.
+However, due to storage issues and the inability to utilize solar power during certain times of the day, it is crucial to accurately predict future production values.
+These forecasts, spanning various time horizons, are essential for minimizing risks associated with solar power trading and energy distribution.
+Solar power plant production is influenced by changing weather conditions, climate, and geographical characteristics.
+
+This project focuses on analyzing data and constructing a model to make day-ahead predictions of production values for the KIVANC 2 GES solar power plant located in Mersin, between 36-37° north latitude and 33-35° east longitude.
+The dataset spans from February 1st, 2021, to June 6th, 2022, with hourly frequency, including production values and weather data for nine coordinates near the power plant.
+The weather variables considered are temperature, relative humidity, downward shortwave radiation flux, and the percentage of total cloud cover for low-level clouds at the specified location.
+
+Each of these variables impacts solar power production: increased temperatures reduce voltage output, humidity and shading decrease production, and downward shortwave radiation affects efficiency.
+Thus, all these factors will be carefully considered when building the model.
+The project involves time series analysis and visualizations of the provided data, utilizing time series regression and autoregressive moving average methods.
+Various models will be evaluated and compared based on their error values, and ultimately, the "best" model will be recommended for forecasting the target production value.
+
+First we will start by setting global options for knitr to display R code in the output document and ensuring that system messages are in English
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+Sys.setenv(LANG = "en")
+```
+
+The block of code below loads a variety of R packages that are commonly used for data manipulation, visualization, machine learning, and time series analysis.
+
+```{r cars}
+require(data.table)
+require(vars)
+require(caret)      
+require(randomForest)  
+require(lubridate)
+require(forecast)
+require(openxlsx) 
+require(skimr)
+require(repr)
+require(tseries)
+require(foreach)
+require(openxlsx) 
+require(ggplot2)
+require(data.table)
+require(dplyr)
+require(skimr)
+require(GGally)
+require(ggcorrplot)
+require(forecast)
+require(tidyverse)
+```
+
+Code block below performs the following steps:
+
+1 Defines the paths to the weather and production data files.
+2 Reads the data from these Excel files.
+3 Converts the data frames into data tables for more efficient processing.
+4 Converts the date columns from numeric to Date format, accounting for the Excel date origin.
+5 Orders the weather_data by date and hour.
+6 Copies weather_data to a new variable data and ensures it remains a data table.
+7 Repeats the date conversion for data to ensure correct formatting.
+
+```{r pressure, echo=FALSE}
+
+production_path <- "C:\\Users\\Yalikent\\Documents\\IE360Project\\production9.xlsx" #Change this to your own data location for production excel
+weather_path <-"C:\\Users\\Yalikent\\Documents\\IE360Project\\processed_weather9.xlsx"   #Change this to your own data location for weather info excel
+
+# Read the Excel files into data frames
+weather_data=read.xlsx(weather_path)
+production_data = read.xlsx(production_path)
+
+# Convert the data frames to data tables for efficient data manipulation
+setDT(weather_data)
+setDT(production_data)
+
+# Convert the date columns to Date format, with the origin specified
+weather_data$date = as.Date(weather_data$date, origin = "1899-12-30")
+production_data$date = as.Date(production_data$date, origin = "1899-12-30")
+
+# Order the weather data by date and hour for proper time series analysis
+weather_data[order(weather_data$date, weather_data$hour)]
+
+# Assign weather_data to a new variable 'data'
+data = weather_data
+
+# Make a wide format version of the weather data if needed for analysis
+wide_weather_data = weather_data
+
+# Ensure 'data' and 'production_data' are data tables
+setDT(data)
+setDT(production_data)
+
+# Convert the date column in 'data' to Date format again to ensure correct format
+data$date = as.Date(data$date, origin = "1899-12-30")
+```
+
+```{r}
+# Define the start date for the training data
+train_start=as.Date('2022-01-02')
+
+# Define the end date for the test data
+test_end = as.Date('2024-05-26')
+
+# Define the current date (as a character string)
+current_date= "2024-05-25"
+```
+
+The code below combines latitude and longitude into a single column lat_lon, pivots the data to a wide format with pivot_wider, prints the wide data for inspection, filters the production data to include only dates within the training and testing period, converts numeric date columns to Date format, merges weather data with production data based on matching date and hour, converts the data frame to a data.table for efficient processing, creates a new dateTime column by combining date and hour, ensures there are no duplicate rows with unique, and initializes an empty data frame data_avg for potential future use.
+
+```{r}
+# Combine latitude and longitude into a single column 'lat_lon'
+data <- data %>%
+  mutate(lat_lon = paste(lat, lon, sep = "_"))
+
+# Pivot the data to a wider format for analysis
+wide_data <- data %>%
+  pivot_wider(
+    id_cols = c(date, hour),  # Keep date and hour as the identifier columns
+    names_from = lat_lon,    # Create new column names from the lat_long identifier
+    names_glue = "{.value}_{lat_lon}",  # Customize the new column names to include variable names and lat_long
+    values_from = c(dswrf_surface, tcdc_low.cloud.layer, tcdc_middle.cloud.layer, tcdc_high.cloud.layer,
+                    tcdc_entire.atmosphere, uswrf_top_of_atmosphere, csnow_surface,
+                    dlwrf_surface, uswrf_surface, tmp_surface)  # List all columns to spread
+  )
+# Print the wide data to inspect it
+print(wide_data)
+
+# Filter the production data to include only dates between the training start and test end dates
+production_data <- production_data[production_data$date >= train_start & production_data$date <= test_end, ]
+
+# Convert the date columns to Date format
+wide_data$date = as.Date(wide_data$date, origin = "1899-12-30")
+production_data$date = as.Date(production_data$date, origin = "1899-12-30")
+
+# Assign wide_data to weather_data for consistency
+weather_data = wide_data
+
+# Merge the weather data with production data based on date and hour
+weather_data = left_join(weather_data, production_data, by =  c("date","hour"))
+
+# Print the merged weather data to inspect it
+print(weather_data)
+
+# Merge wide_data with production data based on date and hour
+data = left_join(wide_data, production_data, by = c("date", "hour"))
+
+# Convert data to a data.table for efficient processing
+setDT(data)
+
+# Create a new datetime column by combining date and hour
+data[,dateTime := ymd(date) + dhours(hour)]
+
+# Ensure there are no duplicate rows in the data
+data = unique(data)
+
+# Initialize an empty data frame for further analysis or aggregation
+data_avg = data.frame()
+
+```
+
+The goal of code block below is to prepare and transform the data for subsequent analysis and modeling.
+Specifically, the steps taken aim to achieve the following objectives:
+
+1 Aggregate Weather Data: The code calculates average values for various weather parameters across different geographical locations.
+By aggregating these values, the data is simplified, making it easier to analyze and use in predictive models.
+Aggregation helps in reducing the dimensionality of the data and focusing on overall trends rather than individual location-specific details.
+
+2 Prepare Data for Forecasting: By extracting the forecast data for a specific date (2024-05-15), the code sets aside a portion of the data that can be used for making predictions.
+This is useful for testing the accuracy and effectiveness of the forecasting model.
+
+3 Filter Training and Testing Data: The code filters the main data to include only the dates within the specified training and testing period (train_start to test_end).
+This ensures that the model is trained on historical data and tested on recent data, allowing for an accurate assessment of its predictive capabilities.
+
+4 Ensure Consistency: By recalculating the average values for the main data set, the code ensures consistency in the data transformation process.
+This step guarantees that the training and testing data have the same structure and aggregated features as the forecast data.
+
+In summary, this code block is essential for transforming raw weather data into a format that is more manageable and suitable for predictive modeling.
+By aggregating weather parameters, preparing forecast data, and ensuring consistent data transformation, the code sets the stage for building robust and accurate forecasting models for solar power production.
+
+```{r}
+# Calculate average values for various weather parameters across all locations
+
+# Calculate the average downward short-wave radiation flux at the surface
+data_avg <- data %>%
+  mutate(DSWRF_Surface_Avg = rowMeans(select(., starts_with("DSWRF_Surface_")), na.rm = TRUE))
+
+
+
+# Calculate the average total cloud cover at the low cloud layer
+data_avg <- data %>%
+  mutate(TCDC_low.cloud.layer_Avg = rowMeans(select(., starts_with("TCDC_low.cloud.layer")), na.rm = TRUE))
+
+# Calculate the average total cloud cover at the middle cloud layer
+data_avg <- data %>%
+  mutate(TCDC_middle.cloud.layer_Avg = rowMeans(select(., starts_with("TCDC_middle.cloud.layer")), na.rm = TRUE))
+
+# Calculate the average total cloud cover at the high cloud layer
+data_avg <- data %>%
+  mutate(TCDC_high.cloud.layer_Avg = rowMeans(select(., starts_with("TCDC_high.cloud.layer")), na.rm = TRUE))
+
+# Calculate the average total cloud cover for the entire atmosphere
+data_avg <- data %>%
+  mutate(TCDC_entire.atmosphere_Avg = rowMeans(select(., starts_with("TCDC_entire.atmosphere")), na.rm = TRUE))
+
+# Calculate the average upward short-wave radiation flux at the top of the atmosphere
+data_avg <- data %>%
+  mutate(USWRF_top_of_atmosphere_Avg = rowMeans(select(., starts_with("USWRF_top_of_atmosphere")), na.rm = TRUE))
+
+# Calculate the average snowfall rate at the surface
+data_avg <- data %>%
+  mutate(CSNOW_surface_Avg = rowMeans(select(., starts_with("CSNOW_surface")), na.rm = TRUE))
+
+# Calculate the average downward long-wave radiation flux at the surface
+data_avg <- data %>%
+  mutate(DLWRF_surface_Avg = rowMeans(select(., starts_with("DLWRF_surface")), na.rm = TRUE))
+
+# Calculate the average upward short-wave radiation flux at the surface
+data_avg <- data %>%
+  mutate(USWRF_surface_Avg = rowMeans(select(., starts_with("USWRF_surface")), na.rm = TRUE))
+
+# Calculate the average temperature at the surface
+data_avg <- data %>%
+  mutate(TMP_surface_Avg = rowMeans(select(., starts_with("TMP_surface")), na.rm = TRUE))
+
+# Extract forecast data for a specific date
+forecast_data = data_avg[date == '2024-05-15']
+
+# Filter the main data for the training and testing period
+data <- data[data$date >= train_start & data$date <= test_end, ]
+
+# Print the average data for inspection
+
+# Repeat the calculation of average values for the main data
+data <- data %>%
+  mutate(DSWRF_Surface_Avg = rowMeans(select(., starts_with("DSWRF_Surface_")), na.rm = TRUE))
+
+data<- data %>%
+  mutate(TCDC_low.cloud.layer_Avg = rowMeans(select(., starts_with("TCDC_low.cloud.layer")), na.rm = TRUE))
+
+data <- data %>%
+  mutate(TCDC_middle.cloud.layer_Avg = rowMeans(select(., starts_with("TCDC_middle.cloud.layer")), na.rm = TRUE))
+
+data <- data %>%
+  mutate(TCDC_high.cloud.layer_Avg = rowMeans(select(., starts_with("TCDC_high.cloud.layer")), na.rm = TRUE))
+
+data <- data %>%
+  mutate(TCDC_entire.atmosphere_Avg = rowMeans(select(., starts_with("TCDC_entire.atmosphere")), na.rm = TRUE))
+
+data <- data %>%
+  mutate(USWRF_top_of_atmosphere_Avg = rowMeans(select(., starts_with("USWRF_top_of_atmosphere")), na.rm = TRUE))
+
+data <- data %>%
+  mutate(CSNOW_surface_Avg = rowMeans(select(., starts_with("CSNOW_surface")), na.rm = TRUE))
+
+data <- data %>%
+  mutate(DLWRF_surface_Avg = rowMeans(select(., starts_with("DLWRF_surface")), na.rm = TRUE))
+
+data <- data %>%
+  mutate(USWRF_surface_Avg = rowMeans(select(., starts_with("USWRF_surface")), na.rm = TRUE))
+
+data <- data %>%
+  mutate(TMP_surface_Avg = rowMeans(select(., starts_with("TMP_surface")), na.rm = TRUE))
+
+```
+
+```{r}
+setDT(data)
+data_avg <- data[, .(date, hour, dateTime,DSWRF_Surface_Avg, TCDC_low.cloud.layer_Avg, TCDC_middle.cloud.layer_Avg, TCDC_high.cloud.layer_Avg,TCDC_entire.atmosphere_Avg, USWRF_top_of_atmosphere_Avg, CSNOW_surface_Avg, DLWRF_surface_Avg, USWRF_surface_Avg,TMP_surface_Avg, production)]
+```
+
+The goal of the code block above is to create a streamlined data set (data_avg) that includes key variables necessary for further analysis and modeling.
+By selecting specific columns, the code ensures that the data is concise and contains only the relevant information needed for forecasting solar power production.
+This helps in focusing on the important features and simplifying subsequent data processing and modeling steps.
+
+```{r}
+ggplot(data,aes(x=dateTime,y=production)) + geom_line() + ggtitle("Hourly Production Values")+xlab("Date")+ylab("Production")
+
+```
+
+The code block above initializes a ggplot object with `data` as the data source and maps `dateTime` to the x-axis and `production` to the y-axis..
+
+The goalis to create a time series plot that visualizes the hourly production values of the solar power plant.
+This plot helps in understanding the trends and patterns in production over time, providing valuable insights for further analysis and forecasting.
+
+```{r}
+ggplot(data[date >= "2022-01-01" & date <= "2022-01-08"],aes(x=dateTime,y=production)) + geom_line(color="blue") + ggtitle("Hourly Production Values In The First Week")+xlab("Date")+ylab("Production")
+
+
+# daily data
+daily_series <-  data[,list(daily_production = mean(production)),by= list(date)] #843 rows
+
+daily_series=daily_series[!is.na(daily_production)] #837 rows, NA's are omitted
+
+ggplot(daily_series,aes(x=date,y=daily_production)) + geom_line(color="red") + ggtitle("Daily Production Values")+xlab("Date")+ylab("Production")
+
+data$month = month(data$date)
+data$year = year(data$date)
+
+monthly_production <-  data[,list(monthly_production = mean(production)),by= list(month,year)]
+monthly_production[,date := as.Date(paste(year,"-",month,"-01",sep=""), format='%Y-%m-%d')] #2024-4 monthly production is NA, 28 rows
+
+
+ggplot(monthly_production,aes(x=date,y=monthly_production)) + geom_line(color="darkgreen") + ggtitle("Monthly Production Values")+xlab("Date")+ylab("Production")
+
+```
+
+Hourly Production Plot for the First Week of 2022: Plots hourly production values for the first week of January 2022 using a blue line.
+Daily Production Calculation and Plot: Calculates daily production by averaging hourly values for each day, removes rows with NA values, and plots the daily production using a red line.
+Monthly Production Calculation and Plot: Extracts month and year from the date, calculates monthly production by averaging daily values, creates a date column for the first day of each month, and plots the monthly production using a dark green line.
+
+The goal of this code block is to visualize solar power production data at different time resolutions: hourly for a specific week, daily, and monthly.
+This helps in understanding production trends and patterns over various time scales, providing valuable insights for further analysis and forecasting.
+
+As evident from the plots, the output values exhibit clear patterns over time, rather than appearing random.
+These patterns can be observed on an hourly, daily, and monthly basis.
+Additionally, autocorrelation and the influence of other variables should be considered.
+Moving forward, the project will delve into these dependencies.
+
+The next steps involve modeling the time series using various predictors and experimenting with different models at each stage to accurately describe solar power production.
+
+# Seasonality and Trend Analysis
+
+To explain the code block below, Adds monthFactor and dayFactor columns to represent the month and day as factors.
+Adds a trend column to represent a sequential trend variable.
+
+Fits a linear model (Model_trend) using the trend column to predict daily production.
+Adds a trend_const column with predictions from the linear model.
+
+Plots actual daily production values and trend predictions on the same graph.
+Plots the residuals (differences between actual values and trend predictions) to assess the model fit.
+
+Uses checkresiduals to visualize and diagnose residuals of the model.
+
+The goal is to analyze the trend in daily production values by fitting a linear model with a trend variable, visualize the trend and its fit, and examine the residuals to evaluate the model's performance.
+
+```{r}
+daily_series[,monthFactor := as.factor(format(daily_series$date, "%m"))] #Added month as a separate column
+daily_series[,dayFactor   := as.factor(format(daily_series$date, "%d"))]
+daily_series[,trend := 1: .N] #Added trend as a separate column
+print(daily_series)
+
+# model with trend
+Model_trend<- lm(daily_production ~ trend, daily_series)
+summary(Model_trend)
+
+daily_series[,trend_const := predict(Model_trend,daily_series)] #Added prediction as a separate column
+ggplot(daily_series,aes(x=date)) + geom_line(aes(y=daily_production, color="real")) + geom_line(aes(y=trend_const, color="trend_const")) + ggtitle("Daily Production Values vs. Trend")+xlab("Date")+ylab("Production")
+
+# residuals
+ggplot(daily_series,aes(x=date)) + geom_line(aes(y=daily_production - trend_const, color="residual")) + ggtitle("Difference Between Daily Production Values and Trend Constant")+xlab("Date")+ylab("Residual")
+checkresiduals(Model_trend$residuals)
+```
+
+There is a noticeable decreasing trend when comparing the values from 2022 and 2024.
+
+The model constructed with the trend component indicates that daily production values are influenced by more than just a trend.
+Residual analysis shows that the residuals are not independent and do not have constant variance.
+They have high autocorrelation.
+Furthermore, winter production values are significantly below the trend line, while summer values are above it, suggesting that seasonality also affects the production values.
+
+```{r}
+# add seasonality component
+
+Model_trend_seasonality <- lm(daily_production ~monthFactor + trend, daily_series)
+summary(Model_trend_seasonality)
+
+daily_series[,trend_Seasonality := predict(Model_trend_seasonality,daily_series)]
+ggplot(daily_series,aes(x=date)) + geom_line(aes(y=daily_production, color="real")) + geom_line(aes(y=trend_Seasonality, color="trend_Seasonality")) + ggtitle("Daily Production Values vs. Trend+Seasonality")+xlab("Date")+ylab("Production")
+
+# residuals
+ggplot(daily_series,aes(x=date)) + geom_line(aes(y=daily_production - trend_Seasonality, color="residual2")) +  ggtitle("Difference Between Daily Production Values and Trend+Seasonality Factor")+xlab("Date")+ylab("Production")
+checkresiduals(Model_trend_seasonality$residuals)
+```
+
+By adding a seasonality component, the model captures the production values more accurately.
+While incorporating seasonality improved the model, the residuals still exhibit non-constant variance, high autocorrelation, and a lack of normal distribution.
+Additionally, other variables, such as weather data, still need to be considered.
+
+# Anaylsis of the time series
+
+The adf.test() function from the tseries package performs the Augmented Dickey-Fuller (ADF) test on the daily_production values.
+The ADF test is used to determine whether a time series is stationary (i.e., its statistical properties do not change over time).
+
+The goal of the code block below is to test the stationarity of the daily production values.
+Stationarity is an important property for time series data in forecasting models, as many models assume the underlying time series is stationary.
+The ADF test helps in verifying this assumption.
+
+```{r}
+
+adf.test(daily_series$daily_production)
+
+```
+
+Test results show that, since p-value is not significant enough (\< 0.05), null hypothesis can b rejected.
+Hence time series is concluded to be stationary.
+
+```{r}
+#daily time series
+daily_ts <- ts(daily_series$daily_production, start = c(2022,01,01), frequency = 365)
+rootTest=ur.kpss(daily_ts) 
+summary(rootTest)
+```
+
+```         
+ Unit root test helps us to determine whether differencing is needed. It is another measure to examine stationarity. Since test statistic is higher than critical value of 5 percent (0.463 < 0.4666), it can be concluded that differencing is required. 
+```
+
+```{r}
+### time plot
+autoplot(daily_ts) +
+  ggtitle("Time Series: Daily Production") +
+  ylab("Production in given units")
+
+### take the first difference
+ddaily_ts <- diff(daily_ts)
+
+### time plot
+autoplot(ddaily_ts) +
+  ggtitle("Time Series: Change in Daily Production") +
+  ylab("Production in given units")
+
+
+### seasonality investigation
+ggseasonplot(ddaily_ts) +
+  ggtitle("Season Plot: Change in Daily Production") +
+  ylab("Production in given units")
+
+
+ggseasonplot(ts(monthly_production$monthly_production, start = c(2022,01), frequency = 12)) +  ggtitle("Season Plot: Monthly Production")+xlab("Date")+ylab("Production")
+
+print(monthly_production)
+
+```
+
+Examining the time series plot of daily production values and their changes over the given period reveals that the data's variability is not constant over time.
+Notably, the variability is highest at the beginning and end of the year.
+This needs to be considered when constructing the model, with efforts made to minimize this variability in the linear regression model.
+
+Additionally, comparing the monthly trends at the start of 2022 and 2024 shows a noticeable similarity.
+
+acf(daily_ts[1:length(daily_ts)], main="ACF of Daily Production"): Plots the ACF of the daily production time series to show how the data points are correlated with their past values.
+
+pacf(daily_ts[1:length(daily_ts)], main="PACF of Daily Production"): Plots the PACF of the daily production time series to show the partial correlations of the data points with their past values, controlling for the values at all shorter lags.
+
+dailyts \<- ts(daily_ts, freq=15): Adjusts the frequency of the time series for decomposition.
+The frequency should be set based on the periodicity of the data (e.g., 365 for daily data over a year).
+Here, 15 is used as an example.
+
+daily_ts_additive \<- decompose(dailyts, type="additive"): Decomposes the time series into additive components (trend, seasonal, and random).
+plot(daily_ts_additive): Plots the components of the additive decomposition.
+
+daily_ts_multip \<- decompose(dailyts, type="multiplicative"): Decomposes the time series into multiplicative components (trend, seasonal, and random).
+plot(daily_ts_multip): Plots the components of the multiplicative decomposition.
+
+The goal of this code block is to analyze the structure of the daily production time series by examining its autocorrelation and partial autocorrelation, and by decomposing the series into trend, seasonal, and random components.
+Decomposition helps in understanding the underlying patterns in the data, which can be useful for forecasting and identifying seasonality and trends.
+
+```{r}
+#Time Series Decomposition
+acf(daily_ts[1:length(daily_ts)])
+pacf(daily_ts[1:length(daily_ts)])
+dailyts <- ts(daily_ts, freq=15)
+
+daily_ts_additive<-decompose(dailyts, type="additive")
+plot(daily_ts_additive) 
+
+daily_ts_multip<-decompose(dailyts, type="multiplicative")
+plot(daily_ts_multip)
+```
+
+The time series of daily production values exhibits high autocorrelation.
+Additionally, both the additive and multiplicative decomposition plots of the series show that the random component violates the assumption of constant variance.
+Given this, ARIMA or a regression model appears to be the most suitable for the data.
+
+Upon examining the PACF (Partial Autocorrelation Function) graph, which isolates the effects between lags, it is evident that the last five days significantly influence the current day's value.
+
+#Building a Regression Model
+
+```{r}
+setDT(weather_data)
+
+daily_weather <- weather_data[, lapply(.SD, mean, na.rm = TRUE), by = .(date)]
+
+
+daily_weather=daily_weather[!is.na(production)] #837 rows, NA's are omitted
+
+print(daily_weather)
+
+
+daily_weather[,residual_model2 := c(daily_series$daily_production - daily_series$trend_Seasonality)]
+
+
+```
+
+```{r}
+print(data_avg$TMP_Surface_Avg)
+
+cR <- data_avg[,c(14,13,12,11,10,9,8,7,6,5,4)]
+
+CorrGraph <- as.data.frame(cR)
+corr <- cor(CorrGraph, use = "pairwise.complete.obs")
+
+ggcorrplot(corr)
+```
+
+As seen in the above figure,DSWRF_Surface_Avg and USWRF_Surface_Avg and TMP_Surface_Avg have a stronger correlation with production values more than other variables.
+So we expect to use these variables in our model, however it will be better to analyze while building the model.
+
+```{r}
+avgdata_lagged = data_avg
+avgdata_lagged$month <- month(avgdata_lagged$date)
+
+# Create lagged variables for days 3 and 5
+avgdata_lagged <- avgdata_lagged %>%
+  arrange(date) %>%
+  mutate(lag_3 = lag(production, 3),
+         lag_5 = lag(production, 5))
+
+# Filter the data for hours between 7 and 18
+
+
+```
+
+# Moving averages
+
+```{r}
+daily_series[,ma_week := ma(daily_series$daily_production, order=7)]
+ggplot(daily_series,aes(x=date)) +geom_line(aes(y = daily_production, color = "daily_production")) + geom_line(aes(y = ma_week, color = "weekly_ma"))  +  ggtitle("Moving Average Plot of Production Values")+xlab("Date")+ylab("Production")
+
+daily_series[,ma_month := ma(daily_series$daily_production, order=30)]
+ggplot(daily_series,aes(x=date)) +geom_line(aes(y = daily_production, color = "daily_production")) + geom_line(aes(y = ma_month, color = "monthly_ma"))  +  ggtitle("Moving Average Plot of Production Values")+xlab("Date")+ylab("Production")
+
+```
+
+The provided code calculates and visualizes the weekly and monthly moving averages of daily production values in the daily_series data frame.
+The moving averages are computed using 7-day and 30-day windows, respectively, to smooth out short-term fluctuations and highlight longer-term trends.
+These moving averages are then plotted alongside the raw daily production values, allowing for a clearer visualization of the underlying patterns.
+This process is crucial for identifying trends, seasonal effects, and other significant patterns in the data, which can inform better decision-making and strategy formulation.
+By reducing noise and focusing on overall trends, the moving averages provide valuable insights into the production values over time, facilitating more informed operational and strategic decisions.
+
+# Regression Models
+
+Now it's time to build regression models.
+We are going to build various regression models and compare them
+
+```{r}
+print(daily_series)
+fit1=lm(production~as.factor(hour)+as.factor(month)+DSWRF_Surface_Avg+USWRF_surface_Avg +CSNOW_surface_Avg
++TMP_surface_Avg+lag_5,avgdata_lagged)
+summary(fit1)
+AIC(fit1)
+
+fit2=lm(sqrt(production)~as.factor(hour)+as.factor(month)+DSWRF_Surface_Avg+TMP_surface_Avg+TCDC_middle.cloud.layer_Avg+ CSNOW_surface_Avg
++lag_5,avgdata_lagged)
+summary(fit2)
+AIC(fit2)
+
+fit3=lm(sqrt(production)~as.factor(hour)+as.factor(month)+DSWRF_Surface_Avg+TMP_surface_Avg+TCDC_middle.cloud.layer_Avg+ CSNOW_surface_Avg
++lag_3,avgdata_lagged)
+summary(fit3)
+AIC(fit3)
+
+fit4=lm(sqrt(production)~as.factor(hour)+as.factor(month)+DSWRF_Surface_Avg+TMP_surface_Avg+TCDC_middle.cloud.layer_Avg+ CSNOW_surface_Avg
++sqrt(lag_5),avgdata_lagged)
+summary(fit4)
+AIC(fit4)
+
+checkresiduals(fit4)
+```
+
+The provided code fits and compares multiple linear regression models to determine the best model for predicting production values using various weather and temporal predictors.
+Initially, the data frame avgdata_lagged is printed, and a series of models are fitted: the first model (fit1) uses the raw production values, while the subsequent models (fit2, fit3, fit4) use the square root of production to stabilize variance.
+Each model includes factors for hour and month, as well as different weather variables and lagged production values.
+Summaries and AIC values are calculated for each model to assess their fit and compare performance.
+Finally, residual diagnostics are performed on the fourth model (fit4) to check for normality, independence, and constant variance of residuals.
+This process is crucial for identifying the most appropriate model, ensuring model assumptions are met, and ultimately deriving reliable and interpretable predictive insights from the data.
+
+```{r}
+avgdata_lagged[,lm4_pred:=(predict(fit4,avgdata_lagged))^2]
+daily_pr<-avgdata_lagged[,list(daily_production = mean(production),daily_prediction = mean(lm4_pred)),by= list(date)]
+avgdata_lagged[, `:=`(year = year(date), month = month(date))]
+
+# Calculate the monthly production and prediction
+monthly_pr <- avgdata_lagged[, .(
+  monthly_production = mean(production, na.rm = TRUE),
+  monthly_prediction = mean(lm4_pred, na.rm = TRUE),
+  date = as.Date(paste(year, month, "01", sep = "-"), format='%Y-%m-%d')
+), by = .(year, month)]
+
+avgdata_lagged$prediction <- (predict(fit4, avgdata_lagged))^2
+
+ggplot(avgdata_lagged, aes(x = date)) +
+  geom_line(aes(y = production, color = "production")) +
+  geom_line(aes(y = prediction, color = "prediction")) +
+  ggtitle("Hourly Production vs Predicted Values") +
+  xlab("Date") +
+  ylab("Production")
+
+ggplot(daily_pr,aes(x=date)) +geom_line(aes(y = daily_production, color = "daily_production")) + geom_line(aes(y = daily_prediction, color = "daily_prediction")) +ggtitle("Daily Production vs Predicted Values")+xlab("Date")+ylab("Production")
+
+ggplot(monthly_pr,aes(x=date)) +geom_line(aes(y =monthly_production , color = "monthly_production")) + geom_line(aes(y = monthly_prediction, color = "monthly_prediction")) +ggtitle("Monthly Production vs Predicted Values")+xlab("Date")+ylab("Production")
+```
+
+The code calculates and visualizes the predicted production values at hourly, daily, and monthly levels using a linear regression model (fit4).
+First, it computes the squared predictions from the model and adds them to the avgdata_lagged data frame.
+It then aggregates the data to calculate the daily and monthly mean production and prediction values.
+For daily predictions, the code groups by date and computes the average production and predicted values.
+For monthly predictions, it groups by year and month, computing the average production and predictions and formatting the date to represent the first day of each month.
+The resulting predictions are plotted against actual production values using ggplot2.
+Three plots are generated: one showing hourly production versus predicted values, one for daily production versus daily predictions, and another for monthly production versus monthly predictions.
+These visualizations help in assessing the model's performance across different time scales and provide a clear comparison of actual versus predicted production values.
+# Hourly Linear Regression Model
+
+```{r}
+
+# Identify the number of days to forecast
+todays_date = as.Date("2024-05-24")
+forecast_date = todays_date + 1
+latest_available_prod_date = as.Date(max(production_data$date)) 
+n_days = as.numeric(forecast_date - latest_available_prod_date)
+
+# Prepare forecasted production data
+forecasted_production = tail(avgdata_lagged, n_days * 24) 
+forecasted_production[, date := date + n_days]
+forecasted_production[, production := NA]
+
+# Combine actual production data with forecasted dates
+production_with_forecast = rbind(avgdata_lagged,forecasted_production) 
+
+
+
+# Reshape data for hourly analysis
+mdata = melt(production_with_forecast, id = c("date", "production"))
+
+
+
+# Create a data table for hourly production
+production_in_hours = data.table()
+info_for_hour1 = production_with_forecast[hour == 1]
+production_in_hours[, date := info_for_hour1$date]
+
+hours <- c(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23)
+
+for (i in hours) {
+  colname = paste("V", i, sep = "")
+  b = production_with_forecast[hour == i]
+  
+  # Ensure the lengths match
+  production_in_hours[, (colname) := b$production[rep(1:.N, length.out = .N)]]
+}
+ print("hey")
+ print(production_in_hours)
+
+# Prepare weather data
+weatherup = data.table()
+weatherup[, date := production_with_forecast$date]
+weatherup[, hour := production_with_forecast$hour] # Replace hour with your actual column name
+weatherup[, DSWRF_Surface_Avg := production_with_forecast$DSWRF_Surface_Avg] # Replace x1 with your actual column name
+weatherup[, TCDC_middle.cloud.layer_Avg := production_with_forecast$TCDC_middle.cloud.layer_Avg] # Replace x2 with your actual column name
+weatherup[, CSNOW_surface_Avg := production_with_forecast$CSNOW_surface_Avg] # Replace x3 with your actual column name
+weatherup[, TMP_surface_Avg := production_with_forecast$TMP_surface_Avg] # Replace x4 with your actual column name
+print(production_with_forecast)
+
+
+# Calculate daily weather averages
+daily_weather = weatherup[, list(TMP_surface_Avg = mean(TMP_surface_Avg), TCDC_middle.cloud.layer_Avg = mean(TCDC_middle.cloud.layer_Avg), DSWRF_Surface_Avg = mean(DSWRF_Surface_Avg), CSNOW_surface_Avg = mean(CSNOW_surface_Avg)), by = list(date)]
+
+print(daily_weather)
+
+# Merge production and weather data
+prod_weather = merge(production_in_hours, daily_weather, by = "date")
+
+print(prod_weather)
+
+# Prepare data for a specific hour (e.g., Hour 8)
+hour8_prod = data.table()
+hour8_prod[, date := prod_weather$date]
+hour8_prod[, production := prod_weather$V8]
+hour8_prod[, monthFactor := as.factor(format(hour8_prod$date, "%m"))]
+hour8_prod[, trend := 1: .N]
+
+# Build and summarize a linear model with a trend component
+Model_trend = lm(production ~ trend + monthFactor, hour8_prod)
+summary(Model_trend)
+
+# Predict and plot trend-corrected production values
+hour8_prod[, trend_const := predict(Model_trend, hour8_prod)]
+ggplot(hour8_prod[25:476], aes(x = date)) + # Replace 25:476 with your actual range
+  geom_line(aes(y = production, color = "real")) +
+  geom_line(aes(y = trend_const, color = "trend_const")) +
+  ggtitle("At hour 8 Production Values vs. Trend") + xlab("Date") + ylab("Production")
+acf(hour8_prod$production[1:473] - hour8_prod$trend_const[1:473]) # Replace 1:473 with your actual range
+
+# Add lag and moving average features
+hour8_prod[, lag3 := shift(hour8_prod$production, 8L, NA)]
+hour8_prod[, ma_2 := ma(hour8_prod$production, order = 2)]
+hour8_prod$ma_2[483:486] = hour8_prod$ma_2[482] # Replace 483:486 with your actual range
+
+
+# Build and summarize a more complex model
+Model_trend2 = lm(production ~ trend + monthFactor + lag3 + ma_2, hour8_prod)
+summary(Model_trend2)
+hour8_prod[, lm2 := predict(Model_trend2, hour8_prod)]
+ggplot(hour8_prod[25:476], aes(x = date)) + # Replace 25:476 with your actual range
+  geom_line(aes(y = production, color = "real")) +
+  geom_line(aes(y = lm2, color = "trend_const")) +
+  ggtitle("At hour 8 Production Values vs. Trend") + xlab("Date") + ylab("Production")
+
+# Correlation analysis of production and weather data
+correlation_info = cor(prod_weather[, c(2:29)], method = "pearson", use = "pairwise.complete.obs") # Adjust column range as needed
+ggcorrplot(correlation_info, type = "lower", lab = TRUE)
+
+#Include weather variables in the model
+hour8_prod[, TCDC_middle.cloud.layer_Avg := prod_weather$TCDC_middle.cloud.layer_Avg]
+hour8_prod[, TMP_surface_Avg := prod_weather$TMP_surface_Avg]
+hour8_prod[, CSNOW_surface_Avg := prod_weather$CSNOW_surface_Avg]
+hour8_prod[, DSWRF_Surface_Avg := prod_weather$DSWRF_Surface_Avg]
+
+```
+
+The provided R code forecasts and analyzes hourly production values by integrating weather data.
+It begins by identifying the number of days to forecast based on the latest available production date and prepares forecasted production data by extending the dates and setting future production values to NA.
+It combines historical production data with the forecasted dates, reshapes the data for hourly analysis, and creates a data table to store hourly production values.
+The code then prepares weather data, calculates daily weather averages, and merges this with the production data.
+For a specific hour (e.g., hour 8), it creates a new data table and adds columns for trend and month factors.
+Linear regression models are built and summarized to analyze production trends and the influence of weather variables, with predictions plotted against actual values to assess model performance.
+This process is crucial for making informed decisions based on forecasted production and understanding the impact of weather on production values.
+
+```{r}
+model_with_regressors = lm(production ~ trend + monthFactor + DSWRF_Surface_Avg + TMP_surface_Avg + ma_2 + lag3 , hour8_prod)
+summary(model_with_regressors)
+hour8_prod[, lm_regressors := predict(model_with_regressors, hour8_prod)]
+ggplot(hour8_prod[25:476], aes(x = date)) + # Replace 25:476 with your actual range
+  geom_line(aes(y = production, color = "real")) +
+  geom_line(aes(y = lm_regressors, color = "regressors")) +
+  ggtitle("At hour 8 Production Values vs. regressors") + xlab("Date") + ylab("Production")
+checkresiduals(model_with_regressors)
+
+# Residual plots
+res = resid(model_with_regressors)
+plot(fitted(model_with_regressors), res)
+qqnorm(res)
+qqline(res)
+
+prod_weather = setDT(prod_weather)
+# Preparing data for multiple hours
+hours = 5:20
+
+
+hour5_prod <- prod_weather[,c(1,7,26:29)]
+hour6_prod <- prod_weather[,c(1,8,26:29)]
+hour7_prod <- prod_weather[,c(1,9,26:29)]
+hour8_prod <- prod_weather[,c(1,10,26:29)]
+hour9_prod <- prod_weather[,c(1,11,26:29)]
+hour10_prod <- prod_weather[,c(1,12,26:29)]
+hour11_prod <- prod_weather[,c(1,13,26:29)]
+hour12_prod <- prod_weather[,c(1,14,26:29)]
+hour13_prod <- prod_weather[,c(1,15,26:29)]
+hour14_prod <- prod_weather[,c(1,16,26:29)]
+hour15_prod <- prod_weather[,c(1,17,26:29)]
+hour16_prod <- prod_weather[,c(1,18,26:29)]
+hour17_prod <- prod_weather[,c(1,19,26:29)]
+hour18_prod <- prod_weather[,c(1,20,26:29)]
+hour19_prod <- prod_weather[,c(1,21,26:29)]
+hour20_prod <- prod_weather[,c(1,22,26:29)]
+
+
+
+dt_list = list(hour5_prod, hour6_prod,hour7_prod,hour8_prod,hour9_prod,hour10_prod,hour11_prod,
+               hour12_prod,hour13_prod,hour14_prod,hour15_prod,hour16_prod,hour17_prod,
+               hour18_prod,hour19_prod,hour20_prod)
+prod = data.table(prod)
+prod[,hourly_prediction := 0.00]
+prod[,hourly_prediction := as.numeric(hourly_prediction)]
+hourly_models <- list()
+t = 5
+for (dt in dt_list){
+  dt[,production:=dt[,2]]
+  dt[,monthFactor := as.factor(format(dt$date, "%m"))]
+  dt[,trend := 1: .N]
+  dt[,ma_2 := ma(dt$production, order=2)]
+  dt[,ma_2 := as.numeric(ma_2)]
+  dt$ma_2[483:486] = dt$ma_2[482]
+ 
+  lm_fit = lm(production ~ trend + monthFactor + TCDC_middle.cloud.layer_Avg + dt$ma_2 , dt)
+  hourly_models[[t-4]] <- summary(lm_fit)
+  dt[,lm_regressors := predict(lm_fit,dt)]
+  dt$lm_regressors[dt$lm_regressors < 0.1] = 0
+  
+  prod$hourly_prediction[prod$hour == t] = dt$lm_regressors
+ 
+}
+```
+
+The R code builds and evaluates multiple linear regression models to predict hourly production values, incorporating weather variables and temporal factors.
+Initially, a regression model is developed for hour 8, including predictors such as trend, month factor, humidity, temperature, moving average, and lagged production.
+The model's predictions are compared to actual values through plots, and residuals are analyzed for model diagnostics.
+The process is then generalized to hours 5 through 20, creating separate data tables for each hour.
+Each data table is fitted with a regression model, including similar predictors adjusted for each hour.
+Predictions are stored and compared to actual production values.
+This approach enables a detailed analysis of hourly production patterns and the impact of weather conditions, providing a comprehensive understanding of production dynamics across different hours.
+
+```{r}
+
+hour5_prod <- prod_weather[,c(1,7,26:29)]
+hour6_prod <- prod_weather[,c(1,8,26:29)]
+hour7_prod <- prod_weather[,c(1,9,26:29)]
+hour8_prod <- prod_weather[,c(1,10,26:29)]
+hour9_prod <- prod_weather[,c(1,11,26:29)]
+hour10_prod <- prod_weather[,c(1,12,26:29)]
+hour11_prod <- prod_weather[,c(1,13,26:29)]
+hour12_prod <- prod_weather[,c(1,14,26:29)]
+hour13_prod <- prod_weather[,c(1,15,26:29)]
+hour14_prod <- prod_weather[,c(1,16,26:29)]
+hour15_prod <- prod_weather[,c(1,17,26:29)]
+hour16_prod <- prod_weather[,c(1,18,26:29)]
+hour17_prod <- prod_weather[,c(1,19,26:29)]
+hour18_prod <- prod_weather[,c(1,20,26:29)]
+hour19_prod <- prod_weather[,c(1,21,26:29)]
+hour20_prod <- prod_weather[,c(1,22,26:29)]
+
+
+names(hour5_prod)[names(hour5_prod) == 'V5'] <- 'production'
+names(hour6_prod)[names(hour6_prod) == 'V6'] <- 'production'
+names(hour7_prod)[names(hour7_prod) == 'V7'] <- 'production'
+names(hour8_prod)[names(hour8_prod) == 'V8'] <- 'production'
+names(hour9_prod)[names(hour9_prod) == 'V9'] <- 'production'
+names(hour10_prod)[names(hour10_prod) == 'V10'] <- 'production'
+names(hour11_prod)[names(hour11_prod) == 'V11'] <- 'production'
+names(hour12_prod)[names(hour12_prod) == 'V12'] <- 'production'
+names(hour13_prod)[names(hour13_prod) == 'V13'] <- 'production'
+names(hour14_prod)[names(hour14_prod) == 'V14'] <- 'production'
+names(hour15_prod)[names(hour15_prod) == 'V15'] <- 'production'
+names(hour16_prod)[names(hour16_prod) == 'V16'] <- 'production'
+names(hour17_prod)[names(hour17_prod) == 'V17'] <- 'production'
+names(hour18_prod)[names(hour18_prod) == 'V18'] <- 'production'
+names(hour19_prod)[names(hour19_prod) == 'V19'] <- 'production'
+names(hour20_prod)[names(hour20_prod) == 'V20'] <- 'production'
+
+dt_list = list(hour5_prod, hour6_prod,hour7_prod,hour8_prod,hour9_prod,hour10_prod,hour11_prod,
+               hour12_prod,hour13_prod,hour14_prod,hour15_prod,hour16_prod,hour17_prod,
+               hour18_prod,hour19_prod,hour20_prod)
+
+# Renaming columns for each hour data table from 5 to 20
+
+
+
+t = 5
+for (dt in dt_list){
+  
+  dt[,monthFactor := as.factor(format(dt$date, "%m"))]
+  dt[,trend := 1: .N]
+  dt[,ma_2 := ma(dt$production, order=1)]
+  dt[,ma_2 := as.numeric(ma_2)]
+  dt$ma_2[873:876] = dt$ma_2[872]
+  lm_fit = lm(production ~ trend + monthFactor + TCDC_middle.cloud.layer_Avg + ma_2 + TMP_surface_Avg + TCDC_middle.cloud.layer_Avg + CSNOW_surface_Avg + DSWRF_Surface_Avg , dt)
+  hourly_models[[t - 4]] = summary(lm_fit)
+  print(summary(lm_fit))
+  hourly_models[[t-4]] <- summary(lm_fit)
+  dt[,lm_regressors := predict(lm_fit,dt)]
+  dt$lm_regressors[dt$lm_regressors < 0.1] = 0
+  data$hourly_prediction[data$hour == t] = dt$lm_regressors
+  prod$hourly_prediction[prod$hour == t] = dt$lm_regressors # Ensure hour column is correctly referenced
+  t = t+1 
+}
+
+```
+
+The code performs regression analysis on hourly production data, extracting columns for hours 5 to 20 from prod_weather and renaming them to 'production'.
+It then iterates through each hourly dataset, adding month and trend factors, calculating a moving average, and fitting a linear regression model using production and various weather predictors.
+The model summaries and predictions are stored for each hour, enhancing the understanding of production variations specific to different times of the day.
+This detailed hourly analysis improves prediction accuracy and provides valuable insights for operational decision-making.
+
+```{r}
+for (j in 1:16) {
+  checkresiduals(hourly_models[[j]]$residuals)
+  plotting_res = data.frame(Residuals = hourly_models[[j]]$residuals,
+                            Fitted_values = prod$hourly_prediction[prod$hour == j + 4][1:872])
+  print(ggplot(plotting_res, aes(x = Fitted_values, y = Residuals)) +
+    geom_point() +
+    ggtitle(paste("CheckResidual Result for ", j + 4, ".00", sep = "")) +
+    geom_smooth(method = "lm", se = FALSE))
+}
+```
+
+Comparing the hourly model to the general linear model reveals that the hourly model more effectively captures variations and understands the behavior of the time series.
+It also shows lower PACF values and more randomly scattered residuals upon visual inspection.
+
+# Conclusion
+
+The comprehensive analysis performed on the hourly production data, integrating various weather variables and temporal factors, has provided valuable insights into the dynamics of production values.
+By preparing forecasted production data and merging it with historical data, we set the stage for a robust hourly analysis.
+The process involved creating detailed hourly data frames, renaming columns for clarity, and constructing regression models tailored to each hour from 5 AM to 8 PM.
+
+The hourly models demonstrated superior performance compared to a general linear model, effectively capturing variations and understanding the behavior of the time series.
+This was evidenced by lower PACF values and more randomly scattered residuals, indicating a better fit and more accurate predictions.
+The inclusion of weather variables such as surface temperature, cloud cover, and snow cover, along with temporal factors like monthly trends and moving averages, significantly enhanced the models' predictive power.
+
+The detailed analysis revealed that hourly-specific dynamics play a crucial role in production values, highlighting the importance of considering these variations in operational planning and decision-making.
+The models provided not only a deeper understanding of the factors affecting production at different times of the day but also reliable predictions that can be used for effective forecasting and strategy formulation.
+
+Overall, the approach underscores the value of granular, hourly-level analysis in capturing the intricate patterns and influences on production values, paving the way for more informed and data-driven decisions in managing production operations.
+
+For future analysis, it could be advantageous to investigate government regulations on solar production capacity, the impact of special days, and specific economic events influencing energy production.
+Considering these factors, creating and incorporating dummy variables related to these effects could enhance the model.
